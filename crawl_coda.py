@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 CODA_URL = "https://coda.io/d/_dn6rnftKCGZ/Everything_suVyKToC#Q3-2025-Roadmap-overview_tuWR35uZ"
 SNOWFLAKE_DATABASE = "proddb"
 SNOWFLAKE_SCHEMA = "fionafan"
-SNOWFLAKE_TABLE = "coda_sample"
+SNOWFLAKE_TABLE = "coda_experiments_daily"
 FETCH_LIMIT = None  # None = fetch all rows, or set a number like 100
 
 

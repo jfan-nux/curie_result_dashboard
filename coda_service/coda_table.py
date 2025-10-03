@@ -48,7 +48,7 @@ class CodaRow:
     values: Dict[str, Any] = field(default_factory=dict)
     
     # Metadata
-    fetched_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    fetched_at: str = field(default_factory=lambda: datetime.now().date().isoformat())
     
     @classmethod
     def from_api_response(cls, row_data: Dict[str, Any], doc_id: str, 
@@ -249,7 +249,7 @@ class CodaTable:
             for row in rows_response.get('items', [])
         ]
         
-        self.last_fetched = datetime.now().isoformat()
+        self.last_fetched = datetime.now().date().isoformat()
         logger.info(f"✅ Fetched {len(self.rows)} rows")
         
         return self.rows
