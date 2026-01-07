@@ -16,6 +16,12 @@ requests>=2.30.0
 slack-sdk>=3.25.0
 snowflake-connector-python[pandas]>=3.5.0
 portkey-ai>=1.0.0
+openai>=1.0.0
+
+# Google API (for Google Docs crawling)
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.1.0
+google-auth>=2.23.0
 
 # Task scheduling
 apscheduler>=3.10.0

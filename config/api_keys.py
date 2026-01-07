@@ -25,7 +25,7 @@ DYNAMIC_VALUES_SECRET_KEY = os.getenv('DYNAMIC_VALUES_SECRET_KEY')
 SNOWFLAKE_CONFIG = {
     'account': os.getenv('SNOWFLAKE_ACCOUNT'),
     'user': os.getenv('SNOWFLAKE_USER'),
-    'password': os.getenv('SNOWFLAKE_PASSWORD'),
+    'password': os.getenv('SNOWFLAKE_PAT'),
     'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE'),
     'database': os.getenv('SNOWFLAKE_DATABASE', 'proddb'),
     'schema': os.getenv('SNOWFLAKE_SCHEMA', 'public'),

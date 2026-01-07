@@ -11,7 +11,11 @@ import base64
 from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
 
+from dotenv import load_dotenv
 from utils.logger import get_logger
+
+# Load environment variables
+load_dotenv()
 
 try:
     from portkey_ai import Portkey
