@@ -4,9 +4,13 @@ Curie Results Crawler
 
 Fetches experiment results from Curie for active experiments in Coda
 and persists to Snowflake.
+
+Includes metric_trend_history column for treatment rows, built from
+historical data in nux_curie_result_daily (accumulates over daily runs).
 """
 
 import re
+import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from pathlib import Path
@@ -140,6 +144,131 @@ class CurieCrawler:
         
         return results_df
     
+    def fetch_metric_history(self, analysis_id: str) -> pd.DataFrame:
+        """
+        Fetch all historical data for an analysis from our daily table.
+        
+        Args:
+            analysis_id: Curie analysis ID
+            
+        Returns:
+            DataFrame with historical metric data (all previous days)
+        """
+        query = f"""
+        SELECT 
+            metric_name,
+            dimension_cut_name,
+            variant_name,
+            DATE(fetched_at) as fetch_date,
+            TRY_CAST(metric_impact_relative AS FLOAT) as impact,
+            p_value,
+            stat_sig
+        FROM {self.database}.{self.schema}.{self.table_name}
+        WHERE analysis_id = '{analysis_id}'
+          AND LOWER(variant_name) != 'control'
+        ORDER BY metric_name, dimension_cut_name, variant_name, fetch_date ASC
+        """
+        
+        try:
+            with SnowflakeHook(database=self.database, schema=self.schema) as hook:
+                history_df = hook.query_snowflake(query, method='pandas')
+            return history_df
+        except Exception as e:
+            logger.warning(f"Could not fetch history (table may not exist yet): {e}")
+            return pd.DataFrame()
+    
+    def compute_trend_history(self, row: pd.Series, history_df: pd.DataFrame, today: str) -> Optional[str]:
+        """
+        Compute trend history for a single metric row (treatment only).
+        
+        Args:
+            row: Current metric row
+            history_df: Historical data for this analysis
+            today: Today's date string
+            
+        Returns:
+            JSON string with trend history, or None for control rows
+        """
+        variant = row.get('variant_name', '')
+        
+        # Skip control rows
+        if variant.lower() == 'control':
+            return None
+            
+        metric_name = row.get('metric_name')
+        dimension_cut = row.get('dimension_cut_name', 'overall')
+        current_impact = row.get('metric_impact_relative')
+        current_p_value = row.get('p_value')
+        current_stat_sig = row.get('stat_sig')
+        
+        # Filter history for this specific metric/dimension/variant
+        if not history_df.empty:
+            mask = (
+                (history_df['metric_name'] == metric_name) &
+                (history_df['dimension_cut_name'] == dimension_cut) &
+                (history_df['variant_name'] == variant)
+            )
+            metric_history = history_df[mask].copy()
+        else:
+            metric_history = pd.DataFrame()
+        
+        # Build values array from history
+        values = []
+        for _, hist_row in metric_history.iterrows():
+            values.append({
+                'date': str(hist_row['fetch_date']),
+                'impact': float(hist_row['impact']) if hist_row['impact'] is not None else None,
+                'p_value': float(hist_row['p_value']) if hist_row['p_value'] is not None else None,
+                'stat_sig': hist_row['stat_sig']
+            })
+        
+        # Add today's value
+        try:
+            current_impact_float = float(current_impact) if current_impact is not None else None
+        except (ValueError, TypeError):
+            current_impact_float = None
+            
+        try:
+            current_p_float = float(current_p_value) if current_p_value is not None else None
+        except (ValueError, TypeError):
+            current_p_float = None
+            
+        values.append({
+            'date': today,
+            'impact': current_impact_float,
+            'p_value': current_p_float,
+            'stat_sig': current_stat_sig
+        })
+        
+        # Compute trend direction
+        trend_direction = 'new'
+        if len(values) >= 2:
+            # Get first and last non-null impacts
+            impacts = [v['impact'] for v in values if v['impact'] is not None]
+            if len(impacts) >= 2:
+                first_impact = impacts[0]
+                last_impact = impacts[-1]
+                delta = last_impact - first_impact
+                
+                if abs(delta) < 0.001:  # Threshold for "stable"
+                    trend_direction = 'stable'
+                elif delta > 0:
+                    trend_direction = 'improving'
+                else:
+                    trend_direction = 'declining'
+        
+        # First seen date
+        first_seen = values[0]['date'] if values else today
+        
+        trend_obj = {
+            'values': values,
+            'first_seen': first_seen,
+            'days_running': len(values),
+            'trend_direction': trend_direction
+        }
+        
+        return json.dumps(trend_obj)
+    
     def crawl_all_experiments(self) -> pd.DataFrame:
         """
         Crawl results for all active experiments.
@@ -186,6 +315,10 @@ class CurieCrawler:
                     logger.warning(f"   ⚠️  No results found")
                     continue
                 
+                # Fetch historical data for trend computation (treatment rows only)
+                history_df = self.fetch_metric_history(analysis_id)
+                logger.info(f"   📊 Historical data: {len(history_df)} rows from previous days")
+                
                 # Add metadata from Coda
                 results_df['coda_row_id'] = exp_row.get('row_id', '')
                 results_df['coda_browser_link'] = exp_row.get('browser_link', '')
@@ -194,6 +327,14 @@ class CurieCrawler:
                 results_df['curie_ios_link'] = curie_link
                 results_df['dv_link'] = exp_row.get('dv', '')
                 results_df['fetched_at'] = today
+                
+                # Compute trend history for each row (only treatment rows get trends)
+                treatment_count = (results_df['variant_name'].str.lower() != 'control').sum()
+                logger.info(f"   📈 Computing trend history for {treatment_count} treatment rows...")
+                results_df['metric_trend_history'] = results_df.apply(
+                    lambda row: self.compute_trend_history(row, history_df, today),
+                    axis=1
+                )
                 
                 all_results.append(results_df)
                 logger.info(f"   ✅ Added {len(results_df)} results")

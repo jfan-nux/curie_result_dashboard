@@ -2,9 +2,10 @@
 """
 Daily Curie Results Crawler
 
-Fetches Curie experiment results for active experiments and persists to Snowflake.
+Fetches Curie experiment results for active experiments from Coda table.
 
-This crawler should run AFTER crawl_coda.py to ensure coda_experiments_daily is populated.
+Prerequisites:
+    Run crawl_coda_experiments.py first to populate the source table
 
 Usage:
     python crawl_curie.py
@@ -19,7 +20,7 @@ load_dotenv()
 logger = get_logger(__name__)
 
 # Configuration
-SOURCE_TABLE = "proddb.fionafan.coda_experiments_daily"  # Input: Coda data
+SOURCE_TABLE = "proddb.fionafan.coda_experiments_focused"  # Input: Coda experiments table
 SNOWFLAKE_DATABASE = "proddb"
 SNOWFLAKE_SCHEMA = "fionafan"
 SNOWFLAKE_TABLE = "nux_curie_result_daily"  # Output: Curie results
@@ -31,11 +32,13 @@ def main():
     logger.info("=" * 80)
     logger.info("🧪 NUX Curie Results Daily Crawler")
     logger.info("=" * 80)
-    logger.info("Note: Reads from coda_experiments_daily table")
-    logger.info("      Run crawl_coda.py first!")
+    logger.info(f"Source: {SOURCE_TABLE}")
+    logger.info(f"Destination: {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}.{SNOWFLAKE_TABLE}")
+    logger.info("=" * 80)
+    logger.info("\n⚠️  Note: Run crawl_coda_experiments.py first to populate source table")
     
     try:
-        # Initialize crawler
+        # Initialize Curie crawler
         crawler = CurieCrawler(
             source_table=SOURCE_TABLE,
             database=SNOWFLAKE_DATABASE,
@@ -47,7 +50,10 @@ def main():
         success = crawler.run()
         
         if success:
-            logger.info("\n🎉 Curie crawl completed successfully!")
+            logger.info("\n" + "=" * 80)
+            logger.info("🎉 Curie crawl completed successfully!")
+            logger.info("=" * 80)
+            logger.info(f"Results saved to: {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}.{SNOWFLAKE_TABLE}")
             sys.exit(0)
         else:
             logger.error("\n💥 Curie crawl failed!")

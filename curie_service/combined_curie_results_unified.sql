@@ -8,6 +8,7 @@ WITH latest_results AS (
         dear.*,  -- Select all columns from dimension_experiment_analysis_results
         tm.desired_direction AS metric_desired_direction,
         tm.description AS metric_description,
+        tm.metric_spec AS metric_spec,
         -- Extract base dimension value (before any parentheses) for deduplication
         CASE 
             WHEN dear.dimension_value IS NULL THEN NULL
@@ -70,6 +71,7 @@ SELECT
     
     -- Extended columns (available for selection)
     metric_description AS metric_definition,  -- Using description from talleyrand_metrics
+    metric_spec,  -- Metric specification from talleyrand_metrics
     NULL AS metric_category,    -- Not available in talleyrand_metrics
     NULL AS metric_subcategory, -- Not available in talleyrand_metrics
     NULL AS metric_importance,  -- Not available in talleyrand_metrics
@@ -113,4 +115,4 @@ ORDER BY
             END
         ELSE 1000 -- Other variants will be sorted alphabetically after
     END,
-    variant_name; 
+    variant_name;
