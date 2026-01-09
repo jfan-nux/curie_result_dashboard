@@ -21,6 +21,7 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 from utils.logger import get_logger
+from utils.snowflake_connection import SnowflakeHook
 from agent.tools import (
     get_live_experiments,
     get_significant_metrics,
@@ -212,10 +213,20 @@ class ExperimentCalloutAgent:
         self.verbose = verbose
         self.client = None
         self.tool_call_count = 0
+        self.total_tool_calls = 0  # Track total across all iterations
         self.iteration_count = 0
         self.messages: List[Dict[str, Any]] = []
         
         self._initialize_client()
+    
+    @property
+    def stats(self) -> dict:
+        """Get agent statistics."""
+        return {
+            'model': self.model,
+            'iterations': self.iteration_count,
+            'tool_calls': self.total_tool_calls
+        }
     
     def _initialize_client(self):
         """Initialize Portkey client via OpenAI SDK."""
@@ -262,6 +273,7 @@ class ExperimentCalloutAgent:
             Tool execution result as string
         """
         self.tool_call_count += 1
+        self.total_tool_calls += 1
         
         tool_name = tool_call.function.name
         arguments_str = tool_call.function.arguments
@@ -583,11 +595,169 @@ def get_output_path(date: str) -> str:
     return str(output_dir / filename)
 
 
+def format_for_slack(callout: str, date: str) -> str:
+    """
+    Convert markdown callout to Slack mrkdwn format.
+    
+    Args:
+        callout: Markdown callout text
+        date: Date of the callout
+        
+    Returns:
+        Slack-formatted string
+    """
+    import re
+    
+    # Slack mrkdwn conversions
+    slack_text = callout
+    
+    # Convert markdown links [text](url) to Slack <url|text>
+    slack_text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', slack_text)
+    
+    # Convert **bold** to *bold*
+    slack_text = re.sub(r'\*\*([^*]+)\*\*', r'*\1*', slack_text)
+    
+    # Convert ### headers to *bold* with emoji
+    slack_text = re.sub(r'^### (.+)$', r'*\1*', slack_text, flags=re.MULTILINE)
+    
+    # Convert horizontal rules
+    slack_text = re.sub(r'^---+$', r'───────────────────', slack_text, flags=re.MULTILINE)
+    
+    # Convert tables to code blocks (Slack doesn't support tables well)
+    # Simple approach: wrap tables in ``` 
+    lines = slack_text.split('\n')
+    in_table = False
+    result_lines = []
+    for line in lines:
+        if line.strip().startswith('|') and not in_table:
+            result_lines.append('```')
+            in_table = True
+        elif not line.strip().startswith('|') and in_table:
+            result_lines.append('```')
+            in_table = False
+        result_lines.append(line)
+    if in_table:
+        result_lines.append('```')
+    
+    slack_text = '\n'.join(result_lines)
+    
+    # Add header
+    header = f"📊 *NUX Experiment Callout - {date}*\n\n"
+    
+    return header + slack_text
+
+
+def persist_callout_to_snowflake(
+    callout_date: str,
+    full_callout: str,
+    slack_formatted: str,
+    model_used: str,
+    generation_time_seconds: float,
+    tool_calls_count: int
+) -> bool:
+    """
+    Persist callout to Snowflake table.
+    
+    Creates table if it doesn't exist, otherwise appends.
+    
+    Args:
+        callout_date: Date analyzed
+        full_callout: Full markdown callout
+        slack_formatted: Slack mrkdwn formatted callout
+        model_used: LLM model used
+        generation_time_seconds: Time taken to generate
+        tool_calls_count: Number of tool calls made
+        
+    Returns:
+        True if successful
+    """
+    import pandas as pd
+    
+    DATABASE = "proddb"
+    SCHEMA = "fionafan"
+    TABLE = "nux_experiment_callouts"
+    
+    try:
+        with SnowflakeHook(database=DATABASE, schema=SCHEMA, create_local_spark=False) as hook:
+            # Check if table exists
+            check_query = f"""
+            SELECT COUNT(*) as cnt 
+            FROM information_schema.tables 
+            WHERE table_schema = '{SCHEMA.upper()}' 
+            AND table_name = '{TABLE.upper()}'
+            AND table_catalog = '{DATABASE.upper()}'
+            """
+            result = hook.query_snowflake(check_query, method='pandas')
+            table_exists = result.iloc[0]['cnt'] > 0
+            
+            if not table_exists:
+                # Create table
+                create_query = f"""
+                CREATE TABLE {DATABASE}.{SCHEMA}.{TABLE} (
+                    callout_id VARCHAR(36) DEFAULT UUID_STRING(),
+                    callout_date DATE NOT NULL,
+                    full_callout TEXT,
+                    slack_formatted TEXT,
+                    model_used VARCHAR(50),
+                    generation_time_seconds FLOAT,
+                    tool_calls_count INT,
+                    generated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+                )
+                """
+                hook.query_without_result(create_query)
+                logger.info(f"Created table {DATABASE}.{SCHEMA}.{TABLE}")
+            
+            # Check if callout for this date already exists
+            check_date_query = f"""
+            SELECT COUNT(*) as cnt
+            FROM {DATABASE}.{SCHEMA}.{TABLE}
+            WHERE callout_date = '{callout_date}'
+            """
+            result = hook.query_snowflake(check_date_query, method='pandas')
+            date_exists = result.iloc[0]['cnt'] > 0
+            
+            if date_exists:
+                # Delete existing callout for this date (replace)
+                delete_query = f"""
+                DELETE FROM {DATABASE}.{SCHEMA}.{TABLE}
+                WHERE callout_date = '{callout_date}'
+                """
+                hook.query_without_result(delete_query)
+                logger.info(f"Replaced existing callout for {callout_date}")
+            
+            # Insert new callout
+            # Escape single quotes in text
+            full_callout_escaped = full_callout.replace("'", "''")
+            slack_formatted_escaped = slack_formatted.replace("'", "''")
+            
+            insert_query = f"""
+            INSERT INTO {DATABASE}.{SCHEMA}.{TABLE} 
+            (callout_date, full_callout, slack_formatted, model_used, generation_time_seconds, tool_calls_count)
+            VALUES (
+                '{callout_date}',
+                '{full_callout_escaped}',
+                '{slack_formatted_escaped}',
+                '{model_used}',
+                {generation_time_seconds},
+                {tool_calls_count}
+            )
+            """
+            hook.query_without_result(insert_query)
+            logger.info(f"Persisted callout to {DATABASE}.{SCHEMA}.{TABLE}")
+            
+            return True
+            
+    except Exception as e:
+        logger.error(f"Failed to persist callout to Snowflake: {e}")
+        return False
+
+
 # ========================================
 # MAIN ENTRY POINT
 # ========================================
 
-def run_daily_callout(date: str = None, model: str = None, save: bool = True, verbose: bool = False) -> tuple:
+def run_daily_callout(date: str = None, model: str = None, save: bool = True, 
+                       verbose: bool = False, persist_to_snowflake: bool = True) -> tuple:
     """
     Run the daily callout generation.
     
@@ -596,10 +766,13 @@ def run_daily_callout(date: str = None, model: str = None, save: bool = True, ve
         model: LLM model to use
         save: Whether to save output to file
         verbose: If True, print context being sent to LLM
+        persist_to_snowflake: Whether to persist callout to Snowflake table
         
     Returns:
         Tuple of (callout_text, output_path or None)
     """
+    import time
+    
     # Get most recent date if not specified
     if date is None:
         date = get_most_recent_date()
@@ -610,7 +783,14 @@ def run_daily_callout(date: str = None, model: str = None, save: bool = True, ve
     if not agent.is_available():
         return "Error: Agent not available. Check Portkey configuration.", None
     
+    # Track generation time
+    start_time = time.time()
     callout = agent.generate_callout(date=date)
+    generation_time = time.time() - start_time
+    
+    # Get stats from agent
+    tool_calls_count = getattr(agent, 'total_tool_calls', 0)
+    model_used = agent.model
     
     output_path = None
     if save:
@@ -621,6 +801,18 @@ def run_daily_callout(date: str = None, model: str = None, save: bool = True, ve
             f.write("---\n\n")
             f.write(callout)
         logger.info(f"Callout saved to: {output_path}")
+    
+    # Persist to Snowflake
+    if persist_to_snowflake:
+        slack_formatted = format_for_slack(callout, date)
+        persist_callout_to_snowflake(
+            callout_date=date,
+            full_callout=callout,
+            slack_formatted=slack_formatted,
+            model_used=model_used,
+            generation_time_seconds=generation_time,
+            tool_calls_count=tool_calls_count
+        )
     
     return callout, output_path
 
