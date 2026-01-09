@@ -115,4 +115,4 @@ ORDER BY
             END
         ELSE 1000 -- Other variants will be sorted alphabetically after
     END,
-    variant_name; 
+    variant_name;

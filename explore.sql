@@ -98,4 +98,7 @@ CONFIGURATOR_PROD.PUBLIC.TALLEYRAND_METRICS;
 
 select * from configurator_prod.public.talleyrand_measures where id = 'd3ab4060-2f73-4956-8d93-d20d3e72fec5';
 
-select * from  proddb.fionafan.coda_experiments_focused;
+select * from proddb.fionafan.nux_curie_result_daily 
+where  analysis_id = '775207ad-2e6d-4283-8e77-6aee61253ce3'
+and metric_name = 'webx_conversion_rate';
+
