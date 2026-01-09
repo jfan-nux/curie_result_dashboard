@@ -107,6 +107,7 @@ def get_live_experiments(date: str = None) -> str:
         project_name,
         brief_summary,
         details,
+        status_notes,
         brief as brief_doc_link,
         curie_ios,
         curie_android,
@@ -497,6 +498,7 @@ def get_experiment_brief(project_name: str, date: str = None) -> str:
         project_name,
         brief_summary,
         details,
+        status_notes,
         brief as brief_doc_link,
         project_status,
         rollout_pct,
@@ -518,6 +520,9 @@ def get_experiment_brief(project_name: str, date: str = None) -> str:
             
             row = df.iloc[0]
             
+            status_notes = row.get('status_notes', '')
+            status_notes_section = f"\n**Status Notes:**\n{status_notes}" if status_notes and str(status_notes) != 'None' else ""
+            
             output = f"""
 **Experiment:** {row['project_name']}
 **Status:** {row['project_status']}
@@ -525,6 +530,7 @@ def get_experiment_brief(project_name: str, date: str = None) -> str:
 
 **Feature Description:**
 {row['brief_summary'] if row['brief_summary'] and str(row['brief_summary']) != 'None' else row.get('details', 'No description available')}
+{status_notes_section}
 
 **Brief Doc:** {row.get('brief_doc_link', 'Not available')}
 **Curie Link:** {row['curie_ios']}

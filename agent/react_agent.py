@@ -597,54 +597,165 @@ def get_output_path(date: str) -> str:
 
 def format_for_slack(callout: str, date: str) -> str:
     """
-    Convert markdown callout to Slack mrkdwn format.
+    Format callout for Slack markdown block.
+    
+    Slack now supports markdown blocks (type: "markdown") that accept standard markdown.
+    See: https://docs.slack.dev/reference/block-kit/blocks/markdown-block
+    
+    Supported: **bold**, *italic*, [links](url), # headers, lists, `code`, > blockquotes
+    NOT supported: tables, horizontal rules, syntax-highlighted code blocks
     
     Args:
         callout: Markdown callout text
         date: Date of the callout
         
     Returns:
-        Slack-formatted string
+        Markdown string ready for Slack markdown block
     """
     import re
     
-    # Slack mrkdwn conversions
     slack_text = callout
     
-    # Convert markdown links [text](url) to Slack <url|text>
-    slack_text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', slack_text)
+    # 1. Convert experiment title headers with inline URLs to proper markdown links
+    # Pattern: ### Experiment Name(https://...) -> ### [Experiment Name](url)
+    def convert_title_with_inline_url(match):
+        title = match.group(1).strip()
+        url = match.group(2).strip()
+        return f"### 🧪 [{title}]({url})"
     
-    # Convert **bold** to *bold*
-    slack_text = re.sub(r'\*\*([^*]+)\*\*', r'*\1*', slack_text)
+    slack_text = re.sub(
+        r'^###\s+([^(\[]+)\((https?://[^)]+)\)\s*$',
+        convert_title_with_inline_url,
+        slack_text,
+        flags=re.MULTILINE
+    )
     
-    # Convert ### headers to *bold* with emoji
-    slack_text = re.sub(r'^### (.+)$', r'*\1*', slack_text, flags=re.MULTILINE)
+    # 2. Add emoji to remaining ### experiment headers
+    slack_text = re.sub(r'^###\s+(?!🧪)(.+)$', r'### 🧪 \1', slack_text, flags=re.MULTILINE)
     
-    # Convert horizontal rules
-    slack_text = re.sub(r'^---+$', r'───────────────────', slack_text, flags=re.MULTILINE)
+    # 3. Convert horizontal rules (not supported) to text separator
+    slack_text = re.sub(r'^---+$', r'─────────────────────', slack_text, flags=re.MULTILINE)
     
-    # Convert tables to code blocks (Slack doesn't support tables well)
-    # Simple approach: wrap tables in ``` 
+    # 4. Convert markdown tables to readable text format (tables not supported in Slack markdown)
+    def convert_table_to_list(table_lines):
+        """Convert markdown table to bullet list format."""
+        if not table_lines:
+            return []
+        
+        # Parse table
+        rows = []
+        headers = []
+        for line in table_lines:
+            # Skip separator lines (|---|---|)
+            if re.match(r'^\|[\s\-:|]+\|$', line.strip()):
+                continue
+            # Parse cells
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            if cells and any(c for c in cells):
+                if not headers:
+                    headers = cells
+                else:
+                    rows.append(cells)
+        
+        if not rows:
+            return []
+        
+        # Format as bullet list with headers as labels
+        result = []
+        for row in rows:
+            row_parts = []
+            for i, cell in enumerate(row):
+                if cell and cell != '—':
+                    header = headers[i] if i < len(headers) else f"Col{i}"
+                    row_parts.append(f"**{header}**: {cell}")
+            if row_parts:
+                result.append('- ' + ' | '.join(row_parts))
+        
+        return result
+    
+    # Process tables
     lines = slack_text.split('\n')
-    in_table = False
     result_lines = []
+    table_buffer = []
+    
     for line in lines:
-        if line.strip().startswith('|') and not in_table:
-            result_lines.append('```')
-            in_table = True
-        elif not line.strip().startswith('|') and in_table:
-            result_lines.append('```')
-            in_table = False
-        result_lines.append(line)
-    if in_table:
-        result_lines.append('```')
+        if line.strip().startswith('|'):
+            table_buffer.append(line)
+        else:
+            if table_buffer:
+                # Convert accumulated table
+                converted = convert_table_to_list(table_buffer)
+                if converted:
+                    result_lines.extend(converted)
+                table_buffer = []
+            result_lines.append(line)
+    
+    # Handle trailing table
+    if table_buffer:
+        converted = convert_table_to_list(table_buffer)
+        if converted:
+            result_lines.extend(converted)
     
     slack_text = '\n'.join(result_lines)
     
-    # Add header
-    header = f"📊 *NUX Experiment Callout - {date}*\n\n"
+    # 5. Clean up multiple blank lines
+    slack_text = re.sub(r'\n{3,}', '\n\n', slack_text)
+    
+    # 6. Add header
+    header = f"# 📊 NUX Experiment Callout - {date}\n\n"
     
     return header + slack_text
+
+
+def get_slack_blocks(callout: str, date: str) -> list:
+    """
+    Generate Slack Block Kit payload with markdown blocks.
+    
+    Args:
+        callout: Markdown callout text
+        date: Date of the callout
+        
+    Returns:
+        List of Slack blocks ready to send via API
+    """
+    formatted = format_for_slack(callout, date)
+    
+    # Split into chunks if needed (12,000 char limit per markdown block)
+    MAX_CHARS = 11000  # Leave some buffer
+    
+    blocks = []
+    
+    if len(formatted) <= MAX_CHARS:
+        blocks.append({
+            "type": "markdown",
+            "text": formatted
+        })
+    else:
+        # Split by experiment sections (---)
+        sections = formatted.split('─────────────────────')
+        current_chunk = ""
+        
+        for section in sections:
+            if len(current_chunk) + len(section) + 30 > MAX_CHARS:
+                if current_chunk:
+                    blocks.append({
+                        "type": "markdown",
+                        "text": current_chunk.strip()
+                    })
+                current_chunk = section
+            else:
+                if current_chunk:
+                    current_chunk += "\n─────────────────────\n" + section
+                else:
+                    current_chunk = section
+        
+        if current_chunk:
+            blocks.append({
+                "type": "markdown",
+                "text": current_chunk.strip()
+            })
+    
+    return {"blocks": blocks}
 
 
 def persist_callout_to_snowflake(
@@ -656,9 +767,9 @@ def persist_callout_to_snowflake(
     tool_calls_count: int
 ) -> bool:
     """
-    Persist callout to Snowflake table.
+    Persist callout to Snowflake table using MERGE (upsert).
     
-    Creates table if it doesn't exist, otherwise appends.
+    Creates table if it doesn't exist, otherwise merges/upserts by callout_date.
     
     Args:
         callout_date: Date analyzed
@@ -671,11 +782,14 @@ def persist_callout_to_snowflake(
     Returns:
         True if successful
     """
-    import pandas as pd
+    from datetime import datetime as dt
     
     DATABASE = "proddb"
     SCHEMA = "fionafan"
     TABLE = "nux_experiment_callouts"
+    
+    # Get current timestamp
+    generated_at = dt.now().strftime('%Y-%m-%d %H:%M:%S')
     
     try:
         with SnowflakeHook(database=DATABASE, schema=SCHEMA, create_local_spark=False) as hook:
@@ -691,59 +805,56 @@ def persist_callout_to_snowflake(
             table_exists = result.iloc[0]['cnt'] > 0
             
             if not table_exists:
-                # Create table
+                # Create table with proper timestamp columns
                 create_query = f"""
                 CREATE TABLE {DATABASE}.{SCHEMA}.{TABLE} (
                     callout_id VARCHAR(36) DEFAULT UUID_STRING(),
-                    callout_date DATE NOT NULL,
+                    callout_date DATE NOT NULL PRIMARY KEY,
                     full_callout TEXT,
                     slack_formatted TEXT,
                     model_used VARCHAR(50),
                     generation_time_seconds FLOAT,
                     tool_calls_count INT,
-                    generated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+                    created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                    updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
                 )
                 """
                 hook.query_without_result(create_query)
                 logger.info(f"Created table {DATABASE}.{SCHEMA}.{TABLE}")
             
-            # Check if callout for this date already exists
-            check_date_query = f"""
-            SELECT COUNT(*) as cnt
-            FROM {DATABASE}.{SCHEMA}.{TABLE}
-            WHERE callout_date = '{callout_date}'
-            """
-            result = hook.query_snowflake(check_date_query, method='pandas')
-            date_exists = result.iloc[0]['cnt'] > 0
-            
-            if date_exists:
-                # Delete existing callout for this date (replace)
-                delete_query = f"""
-                DELETE FROM {DATABASE}.{SCHEMA}.{TABLE}
-                WHERE callout_date = '{callout_date}'
-                """
-                hook.query_without_result(delete_query)
-                logger.info(f"Replaced existing callout for {callout_date}")
-            
-            # Insert new callout
             # Escape single quotes in text
             full_callout_escaped = full_callout.replace("'", "''")
             slack_formatted_escaped = slack_formatted.replace("'", "''")
             
-            insert_query = f"""
-            INSERT INTO {DATABASE}.{SCHEMA}.{TABLE} 
-            (callout_date, full_callout, slack_formatted, model_used, generation_time_seconds, tool_calls_count)
-            VALUES (
-                '{callout_date}',
-                '{full_callout_escaped}',
-                '{slack_formatted_escaped}',
-                '{model_used}',
-                {generation_time_seconds},
-                {tool_calls_count}
-            )
+            # Use MERGE for upsert - update if exists, insert if not
+            merge_query = f"""
+            MERGE INTO {DATABASE}.{SCHEMA}.{TABLE} AS target
+            USING (
+                SELECT 
+                    '{callout_date}'::DATE AS callout_date,
+                    '{full_callout_escaped}' AS full_callout,
+                    '{slack_formatted_escaped}' AS slack_formatted,
+                    '{model_used}' AS model_used,
+                    {generation_time_seconds} AS generation_time_seconds,
+                    {tool_calls_count} AS tool_calls_count,
+                    '{generated_at}'::TIMESTAMP_NTZ AS generated_at
+            ) AS source
+            ON target.callout_date = source.callout_date
+            WHEN MATCHED THEN
+                UPDATE SET
+                    full_callout = source.full_callout,
+                    slack_formatted = source.slack_formatted,
+                    model_used = source.model_used,
+                    generation_time_seconds = source.generation_time_seconds,
+                    tool_calls_count = source.tool_calls_count,
+                    updated_at = source.generated_at
+            WHEN NOT MATCHED THEN
+                INSERT (callout_date, full_callout, slack_formatted, model_used, generation_time_seconds, tool_calls_count, created_at, updated_at)
+                VALUES (source.callout_date, source.full_callout, source.slack_formatted, source.model_used, source.generation_time_seconds, source.tool_calls_count, source.generated_at, source.generated_at)
             """
-            hook.query_without_result(insert_query)
-            logger.info(f"Persisted callout to {DATABASE}.{SCHEMA}.{TABLE}")
+            hook.query_without_result(merge_query)
+            logger.info(f"✅ Persisted callout to {DATABASE}.{SCHEMA}.{TABLE} (MERGE upsert)")
+            logger.info(f"   Date: {callout_date}, Timestamp: {generated_at}")
             
             return True
             

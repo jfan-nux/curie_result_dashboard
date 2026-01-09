@@ -102,3 +102,10 @@ select * from proddb.fionafan.nux_curie_result_daily
 where  analysis_id = '775207ad-2e6d-4283-8e77-6aee61253ce3'
 and metric_name = 'webx_conversion_rate';
 
+select * from proddb.fionafan.nux_experiment_callouts ;
+grant select on proddb.fionafan.nux_experiment_callouts to role public;
+
+
+
+
+select * from proddb.fionafan.coda_experiments_focused where view_name = 'Live Experiments';
